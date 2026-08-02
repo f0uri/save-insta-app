@@ -1,11 +1,12 @@
 [app]
 title = Save Insta
+icon.filename = %(source.dir)s/icon.png
 package.name = saveinsta
 package.domain = com.youssefmansouri
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas
+source.include_exts = py,png,jpg,kv,atlas,ttf
 version = 1.0
-requirements = python3,kivy==2.3.1,requests,yt-dlp,sqlite3,urllib3,charset_normalizer,certifi,idna
+requirements = python3,kivy==2.2.1,requests,yt-dlp,sqlite3,urllib3,charset_normalizer,certifi,idna
 orientation = portrait
 fullscreen = 0
 
