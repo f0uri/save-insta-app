@@ -7,6 +7,17 @@ import os, sys, json, re, time, sqlite3, threading
 
 import requests
 import yt_dlp
+import arabic_reshaper
+from bidi.algorithm import get_display
+
+def ar(text):
+    """Reshape + bidi-reorder Arabic text for correct display in Kivy,
+    which renders raw codepoints left-to-right without joining letters
+    or applying the bidirectional algorithm."""
+    try:
+        return get_display(arabic_reshaper.reshape(text))
+    except Exception:
+        return text
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -41,13 +52,22 @@ else:
     # 'ttf' is included in buildozer.spec's source.include_exts.
     pass
 
-IOS_BLUE = (0.0, 0.48, 1.0, 1)
-IOS_GRAY = (0.56, 0.56, 0.58, 1)
-IOS_LIGHT_GRAY = (0.95, 0.95, 0.97, 1)
+from kivy.uix.behaviors import ButtonBehavior
+from kivy.uix.image import Image as KvImage
+
+# Brand palette — matches the app icon's gradient identity instead of a
+# flat single accent color, so the in-app UI and the launcher icon feel
+# like the same product.
+BRAND_PURPLE = (0.588, 0.275, 0.863, 1)
+BRAND_PINK = (1.0, 0.353, 0.510, 1)
+BRAND_ORANGE = (1.0, 0.588, 0.235, 1)
+IOS_BLUE = BRAND_PURPLE  # kept name for backward-compat with existing code
+IOS_GRAY = (0.52, 0.5, 0.58, 1)
+IOS_LIGHT_GRAY = (0.965, 0.96, 0.975, 1)
 IOS_WHITE = (1, 1, 1, 1)
-IOS_BLACK = (0, 0, 0, 1)
+IOS_BLACK = (0.13, 0.11, 0.17, 1)
 IOS_GREEN = (0.2, 0.78, 0.35, 1)
-IOS_RED = (1.0, 0.23, 0.19, 1)
+IOS_RED = (0.93, 0.27, 0.33, 1)
 Window.clearcolor = IOS_LIGHT_GRAY
 
 def _get_db_path():
@@ -240,12 +260,119 @@ def download_media(url, download_dir):
     except Exception as e:
         return None, str(e)[:300]
 
+class _SearchIcon(Widget):
+    """Vector-drawn magnifying-glass icon — no external asset needed."""
+    def __init__(self, color=IOS_WHITE, **kwargs):
+        kwargs.setdefault('size_hint', (None, None))
+        kwargs.setdefault('size', (dp(18), dp(18)))
+        super().__init__(**kwargs)
+        with self.canvas:
+            Color(*color)
+            self._circle = Line(circle=(0, 0, 0), width=dp(1.7))
+            self._handle = Line(points=[0, 0, 0, 0], width=dp(1.7), cap='round')
+        self.bind(pos=self._upd, size=self._upd)
+        self._upd()
+
+    def _upd(self, *a):
+        r = self.width * 0.30
+        cx = self.x + self.width * 0.40
+        cy = self.y + self.height * 0.62
+        self._circle.circle = (cx, cy, r)
+        hx1 = cx + r * 0.72
+        hy1 = cy - r * 0.72
+        self._handle.points = [hx1, hy1, self.x + self.width * 0.92, self.y + self.height * 0.10]
+
+class _DownloadIcon(Widget):
+    """Vector-drawn download-arrow icon (stem + chevron + base line)."""
+    def __init__(self, color=IOS_WHITE, **kwargs):
+        kwargs.setdefault('size_hint', (None, None))
+        kwargs.setdefault('size', (dp(18), dp(18)))
+        super().__init__(**kwargs)
+        with self.canvas:
+            Color(*color)
+            self._stem = Line(points=[0, 0, 0, 0], width=dp(1.8), cap='round')
+            self._arrow = Line(points=[0, 0, 0, 0, 0, 0], width=dp(1.8), joint='round', cap='round')
+            self._base = Line(points=[0, 0, 0, 0], width=dp(1.8), cap='round')
+        self.bind(pos=self._upd, size=self._upd)
+        self._upd()
+
+    def _upd(self, *a):
+        cx = self.x + self.width / 2
+        top = self.y + self.height * 0.92
+        mid = self.y + self.height * 0.42
+        w = self.width * 0.34
+        self._stem.points = [cx, top, cx, mid]
+        self._arrow.points = [cx - w, mid + self.height * 0.05, cx, mid - self.height * 0.08, cx + w, mid + self.height * 0.05]
+        self._base.points = [self.x + self.width * 0.12, self.y + self.height * 0.06,
+                              self.x + self.width * 0.88, self.y + self.height * 0.06]
+
+class IconButton(ButtonBehavior, BoxLayout):
+    """A rounded, glass-shadowed button combining a vector icon + label.
+    Replaces plain text buttons so actions read at a glance instead of
+    relying on emoji glyphs the bundled font doesn't contain."""
+    def __init__(self, text='', icon=None, bg_color=None, fg_color=None, **kwargs):
+        super().__init__(**kwargs)
+        self.orientation = 'horizontal'
+        self.spacing = dp(8)
+        self.size_hint_y = None
+        self.height = dp(50)
+        self._bg = bg_color or BRAND_PURPLE
+        fg = fg_color or IOS_WHITE
+        with self.canvas.before:
+            Color(0, 0, 0, 0.12)
+            self._shadow = RoundedRectangle(radius=[dp(14)] * 4)
+            self._color_instr = Color(*self._bg)
+            self._rect = RoundedRectangle(radius=[dp(14)] * 4)
+        self.bind(pos=self._upd, size=self._upd)
+        self.add_widget(Widget())
+        self._icon_widget = None
+        if icon == 'search':
+            self._icon_widget = _SearchIcon(color=fg)
+        elif icon == 'download':
+            self._icon_widget = _DownloadIcon(color=fg)
+        if self._icon_widget:
+            self.add_widget(self._icon_widget)
+        self.label = Label(text=text, color=fg, font_size='16sp', bold=True, size_hint=(None, None))
+        self.label.bind(texture_size=lambda inst, val: setattr(self.label, 'size', val))
+        self.add_widget(self.label)
+        self.add_widget(Widget())
+
+    def set_bg(self, color):
+        self._color_instr.rgba = color
+
+    def set_fg(self, color):
+        self.label.color = color
+        if self._icon_widget:
+            self._icon_widget.canvas.clear()
+            with self._icon_widget.canvas:
+                Color(*color)
+            # icons are simple enough to just redraw via a fresh instance swap
+            new_icon = type(self._icon_widget)(color=color)
+            idx = self.children.index(self._icon_widget)
+            self.remove_widget(self._icon_widget)
+            self.add_widget(new_icon, index=idx)
+            self._icon_widget = new_icon
+
+    def _upd(self, *a):
+        self._rect.pos = self.pos
+        self._rect.size = self.size
+        self._shadow.pos = (self.x, self.y - dp(2))
+        self._shadow.size = self.size
+
+    def on_press(self):
+        Animation.cancel_all(self, 'opacity')
+        Animation(opacity=0.85, duration=0.06).start(self)
+
+    def on_release(self):
+        Animation.cancel_all(self, 'opacity')
+        Animation(opacity=1, duration=0.12).start(self)
+
 class iOSButton(Button):
-    def __init__(self, **kwargs):
+    def __init__(self, bg_color=None, **kwargs):
         super().__init__(**kwargs)
         self.background_normal = ''
         self.background_color = (0, 0, 0, 0)  # actual fill drawn manually below
-        self._fill_color = IOS_BLUE
+        self._fill_color = bg_color or BRAND_PURPLE
         self.color = IOS_WHITE
         self.font_size = '16sp'
         self.bold = True
@@ -254,7 +381,7 @@ class iOSButton(Button):
         with self.canvas.before:
             Color(0, 0, 0, 0.12)
             self.shadow = RoundedRectangle(radius=[dp(12)] * 4)
-            Color(*IOS_BLUE)
+            Color(*self._fill_color)
             self.rect = RoundedRectangle(radius=[dp(12)] * 4)
         self.bind(pos=self._upd, size=self._upd)
 
@@ -334,7 +461,7 @@ class ProfileCard(iOSCard):
         name = data.get('full_name') or data.get('username')
         self.add_widget(
             Label(
-                text=name,
+                text=ar(name),
                 font_size='20sp',
                 bold=True,
                 color=IOS_BLACK,
@@ -366,7 +493,7 @@ class ProfileCard(iOSCard):
                     color=IOS_BLACK,
                 )
             )
-            b.add_widget(Label(text=lbl, font_size='12sp', color=IOS_GRAY))
+            b.add_widget(Label(text=ar(lbl), font_size='12sp', color=IOS_GRAY))
             stats.add_widget(b)
         self.add_widget(stats)
         badges = BoxLayout(size_hint_y=None, height=dp(30), spacing=dp(8))
@@ -374,21 +501,21 @@ class ProfileCard(iOSCard):
         status_color = IOS_RED if data.get('is_private') else IOS_GREEN
         badges.add_widget(
             Label(
-                text="🔒 خاص" if data.get('is_private') else "🌐 عام",
+                text=ar("خاص") if data.get('is_private') else ar("عام"),
                 color=status_color,
                 font_size='13sp',
             )
         )
         if data.get('is_verified'):
             badges.add_widget(
-                Label(text="✅ موثّق", color=IOS_BLUE, font_size='13sp')
+                Label(text=ar("موثّق"), color=IOS_BLUE, font_size='13sp')
             )
         badges.add_widget(Widget())
         self.add_widget(badges)
         bio = data.get('biography', 'لا يوجد بايو')
         self.add_widget(
             Label(
-                text=f"📝 {bio}",
+                text=ar(bio),
                 font_size='14sp',
                 color=IOS_BLACK,
                 size_hint_y=None,
@@ -397,7 +524,7 @@ class ProfileCard(iOSCard):
         )
         btns = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(10))
         cb = Button(
-            text='📋 نسخ البايو',
+            text=ar('نسخ البايو'),
             background_normal='',
             background_color=(0.9, 0.9, 0.93, 1),
             color=IOS_BLUE,
@@ -409,14 +536,14 @@ class ProfileCard(iOSCard):
             Clipboard.copy(bio)
             Popup(
                 title='',
-                content=Label(text='✅ تم نسخ البايو!', color=IOS_GREEN, font_size='16sp'),
+                content=Label(text=ar('تم نسخ البايو!'), color=IOS_GREEN, font_size='16sp'),
                 size_hint=(0.8, 0.2),
             ).open()
 
         cb.bind(on_press=copy_bio)
         btns.add_widget(cb)
         db = Button(
-            text='📥 صورة البروفايل',
+            text=ar('صورة البروفايل'),
             background_normal='',
             background_color=IOS_BLUE,
             color=IOS_WHITE,
@@ -428,7 +555,7 @@ class ProfileCard(iOSCard):
             if not data.get('pic_url'):
                 Popup(
                     title='',
-                    content=Label(text='❌ لا توجد صورة', color=IOS_RED, font_size='16sp'),
+                    content=Label(text=ar('لا توجد صورة'), color=IOS_RED, font_size='16sp'),
                     size_hint=(0.8, 0.2),
                 ).open()
                 return
@@ -459,7 +586,7 @@ class ProfileCard(iOSCard):
                 Clock.schedule_once(
                     lambda dt: Popup(
                         title='',
-                        content=Label(text='✅ تم الحفظ', color=IOS_GREEN, font_size='16sp'),
+                        content=Label(text=ar('تم الحفظ'), color=IOS_GREEN, font_size='16sp'),
                         size_hint=(0.8, 0.2),
                     ).open(),
                     0,
@@ -468,7 +595,7 @@ class ProfileCard(iOSCard):
                 Clock.schedule_once(
                     lambda dt: Popup(
                         title='',
-                        content=Label(text='❌ فشل', color=IOS_RED, font_size='16sp'),
+                        content=Label(text=ar('فشل'), color=IOS_RED, font_size='16sp'),
                         size_hint=(0.8, 0.2),
                     ).open(),
                     0,
@@ -478,7 +605,7 @@ class ProfileCard(iOSCard):
                 lambda dt: Popup(
                     title='',
                     content=Label(
-                        text=f'❌ {str(e)[:80]}', color=IOS_RED, font_size='14sp'
+                        text=ar(str(e)[:80]), color=IOS_RED, font_size='14sp'
                     ),
                     size_hint=(0.8, 0.2),
                 ).open(),
@@ -489,52 +616,71 @@ class SaveInstaApp(App):
     def build(self):
         self.title = "Save Insta"
         init_db()  # runs now, once App.user_data_dir is available
-        root = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(10))
+        root = BoxLayout(orientation='vertical', padding=dp(16), spacing=dp(12))
         with root.canvas.before:
             Color(*IOS_LIGHT_GRAY)
             self.rect = RoundedRectangle(pos=root.pos, size=root.size)
         root.bind(size=self._upd, pos=self._upd)
-        root.add_widget(
-            Label(
-                text="[b]Save Insta[/b]",
-                markup=True,
-                font_size='26sp',
-                color=IOS_BLACK,
-                size_hint_y=None,
-                height=dp(50),
+
+        header = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(10))
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
+        if os.path.exists(icon_path):
+            header.add_widget(
+                KvImage(source=icon_path, size_hint=(None, None), size=(dp(44), dp(44)))
             )
+        title_box = BoxLayout(orientation='vertical', size_hint_x=None)
+        title_box.bind(minimum_width=title_box.setter('width'))
+        title_lbl = Label(
+            text="[b]Save Insta[/b]",
+            markup=True,
+            font_size='24sp',
+            color=IOS_BLACK,
+            size_hint=(None, None),
+            halign='left',
         )
-        root.add_widget(
-            Label(
-                text="© 2026 Youssef Mansouri",
-                font_size='11sp',
-                color=IOS_GRAY,
-                size_hint_y=None,
-                height=dp(20),
-            )
-        )
-        tabs = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-        self.bs = Button(
-            text='🔍 بحث',
-            background_normal='',
-            background_color=IOS_BLUE,
-            color=IOS_WHITE,
-            font_size='15sp',
-            bold=True,
-        )
-        self.bd = Button(
-            text='⬇️ تحميل',
-            background_normal='',
-            background_color=(0.85, 0.85, 0.88, 1),
+        title_lbl.bind(texture_size=lambda i, v: setattr(title_lbl, 'size', v))
+        title_box.add_widget(title_lbl)
+        sub_lbl = Label(
+            text="© 2026 Youssef Mansouri",
+            font_size='11sp',
             color=IOS_GRAY,
-            font_size='15sp',
-            bold=True,
+            size_hint=(None, None),
+            halign='left',
         )
+        sub_lbl.bind(texture_size=lambda i, v: setattr(sub_lbl, 'size', v))
+        title_box.add_widget(sub_lbl)
+        header.add_widget(title_box)
+        header.add_widget(Widget())
+        root.add_widget(header)
+
+        # thin brand-colored accent bar under the header, echoing the icon's gradient
+        accent = BoxLayout(size_hint_y=None, height=dp(4))
+        with accent.canvas:
+            Color(*BRAND_PINK)
+            self._a1 = RoundedRectangle(radius=[dp(2)] * 4)
+            Color(*BRAND_PURPLE)
+            self._a2 = RoundedRectangle(radius=[dp(2)] * 4)
+            Color(*BRAND_ORANGE)
+            self._a3 = RoundedRectangle(radius=[dp(2)] * 4)
+        accent.bind(pos=self._upd_accent, size=self._upd_accent)
+        self._accent = accent
+        root.add_widget(accent)
+
+        # segmented tab control (single glass pill housing both tabs)
+        tabs_shell = BoxLayout(size_hint_y=None, height=dp(52), padding=dp(4), spacing=dp(4))
+        with tabs_shell.canvas.before:
+            Color(1, 1, 1, 0.6)
+            self._tabs_bg = RoundedRectangle(radius=[dp(16)] * 4)
+        tabs_shell.bind(pos=lambda i, v: setattr(self._tabs_bg, 'pos', v),
+                         size=lambda i, v: setattr(self._tabs_bg, 'size', v))
+        self.bs = IconButton(text=ar('بحث'), icon='search', bg_color=BRAND_PURPLE)
+        self.bd = IconButton(text=ar('تحميل'), icon='download', bg_color=(0, 0, 0, 0), fg_color=IOS_GRAY)
         self.bs.bind(on_press=self.show_search)
         self.bd.bind(on_press=self.show_dl)
-        tabs.add_widget(self.bs)
-        tabs.add_widget(self.bd)
-        root.add_widget(tabs)
+        tabs_shell.add_widget(self.bs)
+        tabs_shell.add_widget(self.bd)
+        root.add_widget(tabs_shell)
+
         self.content = BoxLayout()
         root.add_widget(self.content)
         self.show_search(None)
@@ -544,16 +690,27 @@ class SaveInstaApp(App):
         self.rect.pos = i.pos
         self.rect.size = i.size
 
+    def _upd_accent(self, i, v):
+        third = i.width / 3
+        self._a1.pos = i.pos
+        self._a1.size = (third, i.height)
+        self._a2.pos = (i.x + third, i.y)
+        self._a2.size = (third, i.height)
+        self._a3.pos = (i.x + third * 2, i.y)
+        self._a3.size = (third, i.height)
+
+    def _recolor_tab(self, btn, bg, fg):
+        btn.set_bg(bg)
+        btn.set_fg(fg)
+
     def show_search(self, i):
-        self.bs.background_color = IOS_BLUE
-        self.bs.color = IOS_WHITE
-        self.bd.background_color = (0.85, 0.85, 0.88, 1)
-        self.bd.color = IOS_GRAY
+        self._recolor_tab(self.bs, BRAND_PURPLE, IOS_WHITE)
+        self._recolor_tab(self.bd, (0, 0, 0, 0), IOS_GRAY)
         self.content.clear_widgets()
         l = BoxLayout(orientation='vertical', spacing=dp(12), padding=dp(8))
-        self.si = iOSInput(hint_text='اسم المستخدم (بدون @)')
+        self.si = iOSInput(hint_text=ar('اسم المستخدم (بدون @)'))
         l.add_widget(self.si)
-        b = iOSButton(text='🔍 بحث')
+        b = IconButton(text=ar('بحث'), icon='search', bg_color=BRAND_PURPLE)
         b.bind(on_press=self.do_search)
         l.add_widget(b)
         self.rc = BoxLayout(orientation='vertical')
@@ -563,15 +720,13 @@ class SaveInstaApp(App):
         self.content.add_widget(l)
 
     def show_dl(self, i):
-        self.bs.background_color = (0.85, 0.85, 0.88, 1)
-        self.bs.color = IOS_GRAY
-        self.bd.background_color = IOS_BLUE
-        self.bd.color = IOS_WHITE
+        self._recolor_tab(self.bs, (0, 0, 0, 0), IOS_GRAY)
+        self._recolor_tab(self.bd, BRAND_PURPLE, IOS_WHITE)
         self.content.clear_widgets()
         l = BoxLayout(orientation='vertical', spacing=dp(12), padding=dp(8))
-        self.ui = iOSInput(hint_text='رابط الريلز أو الستوري...')
+        self.ui = iOSInput(hint_text=ar('رابط الريلز أو المنشور العام...'))
         l.add_widget(self.ui)
-        b = iOSButton(text='⬇️ تحميل الآن')
+        b = IconButton(text=ar('تحميل الآن'), icon='download', bg_color=BRAND_PURPLE)
         b.bind(on_press=self.do_dl)
         l.add_widget(b)
         self.st = Label(
@@ -590,14 +745,14 @@ class SaveInstaApp(App):
             Popup(
                 title='',
                 content=Label(
-                    text='❌ أدخل اسم المستخدم', color=IOS_RED, font_size='16sp'
+                    text=ar('أدخل اسم المستخدم'), color=IOS_RED, font_size='16sp'
                 ),
                 size_hint=(0.8, 0.2),
             ).open()
             return
         self.rc.clear_widgets()
         self.rc.add_widget(
-            Label(text='⏳ جاري البحث...', color=IOS_GRAY, font_size='16sp')
+            Label(text=ar('جاري البحث...'), color=IOS_GRAY, font_size='16sp')
         )
         threading.Thread(target=self._s_th, args=(u,)).start()
 
@@ -609,7 +764,7 @@ class SaveInstaApp(App):
         self.rc.clear_widgets()
         if r.get('error'):
             self.rc.add_widget(
-                Label(text=r['error'], color=IOS_RED, font_size='16sp')
+                Label(text=ar(r['error']), color=IOS_RED, font_size='16sp')
             )
         else:
             self.rc.add_widget(ProfileCard(r))
@@ -620,12 +775,12 @@ class SaveInstaApp(App):
             Popup(
                 title='',
                 content=Label(
-                    text='❌ ألصق الرابط أولاً', color=IOS_RED, font_size='16sp'
+                    text=ar('ألصق الرابط أولاً'), color=IOS_RED, font_size='16sp'
                 ),
                 size_hint=(0.8, 0.2),
             ).open()
             return
-        self.st.text = '⏳ جاري التحميل...'
+        self.st.text = ar('جاري التحميل...')
         threading.Thread(target=self._dl_th, args=(url,)).start()
 
     def _dl_th(self, url):
@@ -642,19 +797,19 @@ class SaveInstaApp(App):
             files, err = download_media(url, sd)
             if err:
                 Clock.schedule_once(
-                    lambda dt: setattr(self.st, 'text', f'❌ {err}'), 0
+                    lambda dt: setattr(self.st, 'text', ar(f'فشل: {err}')), 0
                 )
             else:
                 names = '\n'.join([os.path.basename(f) for f in files])
                 Clock.schedule_once(
                     lambda dt: setattr(
-                        self.st, 'text', f'✅ تم التحميل:\n{names}'
+                        self.st, 'text', ar('تم التحميل:') + '\n' + names
                     ),
                     0,
                 )
         except Exception as e:
             Clock.schedule_once(
-                lambda dt: setattr(self.st, 'text', f'❌ {str(e)[:100]}'), 0
+                lambda dt: setattr(self.st, 'text', ar(f'خطأ: {str(e)[:100]}')), 0
             )
 
 if __name__ == '__main__':
