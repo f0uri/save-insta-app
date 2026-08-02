@@ -812,5 +812,24 @@ class SaveInstaApp(App):
                 lambda dt: setattr(self.st, 'text', ar(f'خطأ: {str(e)[:100]}')), 0
             )
 
+def _write_crash_log(tb_text):
+    try:
+        try:
+            from android.storage import primary_external_storage_path
+            base = primary_external_storage_path()
+        except Exception:
+            base = os.path.expanduser("~")
+        crash_dir = os.path.join(base, "Download", "SaveInsta")
+        os.makedirs(crash_dir, exist_ok=True)
+        with open(os.path.join(crash_dir, "crash_log.txt"), "w", encoding="utf-8") as f:
+            f.write(tb_text)
+    except Exception:
+        pass  # if we can't even write the crash log, there's nothing more we can do
+
 if __name__ == '__main__':
-    SaveInstaApp().run()
+    try:
+        SaveInstaApp().run()
+    except Exception:
+        import traceback
+        _write_crash_log(traceback.format_exc())
+        raise
