@@ -7,13 +7,24 @@ import os, sys, json, re, time, sqlite3, threading
 
 import requests
 import yt_dlp
-import arabic_reshaper
-from bidi.algorithm import get_display
+
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    _AR_SHAPING_AVAILABLE = True
+except Exception:
+    # If these didn't get bundled into the APK correctly, fail soft:
+    # Arabic text will render disconnected/unordered instead of crashing
+    # the whole app at startup (a bare import crash happens before our
+    # own crash-log code ever runs, so it must never be allowed to raise).
+    _AR_SHAPING_AVAILABLE = False
 
 def ar(text):
     """Reshape + bidi-reorder Arabic text for correct display in Kivy,
     which renders raw codepoints left-to-right without joining letters
     or applying the bidirectional algorithm."""
+    if not _AR_SHAPING_AVAILABLE:
+        return text
     try:
         return get_display(arabic_reshaper.reshape(text))
     except Exception:
