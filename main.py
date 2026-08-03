@@ -6,7 +6,12 @@ Save Insta - Copyright 2026 Youssef Mansouri
 import os, sys, json, re, time, sqlite3, threading
 
 import requests
-import yt_dlp
+# yt_dlp is NOT imported here on purpose. It pulls in ~1800 extractor
+# modules, and importing it at module load time means Python has to pay
+# that cost before Kivy ever creates a window — that's what was showing
+# up as a long "Loading..." screen on first app launch. It's imported
+# lazily inside download_media() instead, the first time it's actually
+# needed, so the UI appears immediately on startup.
 
 # --- Pure-Python Arabic shaping (no external packages) -----------------
 # Kivy renders raw Unicode codepoints left-to-right with no letter-joining
@@ -109,12 +114,63 @@ def _shape_arabic(text):
         i += 1
     return ''.join(reversed(out))
 
+def _char_is_arabic(ch):
+    return ch in _AR_FORMS or ch == _LAM
+
+# Ranges the bundled font (NotoNaskhArabic-Regular, a text-only font) has
+# no glyphs for. Kivy doesn't do per-glyph font fallback within a single
+# Label, so leaving these in just draws tofu boxes — better to drop them.
+_UNSUPPORTED_RANGES = (
+    (0x1F000, 0x1FFFF),  # emoji & pictographs
+    (0x2600, 0x27BF),    # misc symbols / dingbats (☀ ✔ etc.)
+    (0x2190, 0x21FF),    # arrows
+    (0x2300, 0x23FF),    # misc technical (⏰ ⌚ etc.)
+    (0xFE00, 0xFE0F),    # variation selectors
+    (0x200D, 0x200D),    # zero-width joiner
+)
+
+def _strip_unrenderable(text):
+    out = []
+    for ch in text:
+        cp = ord(ch)
+        if any(lo <= cp <= hi for lo, hi in _UNSUPPORTED_RANGES):
+            continue
+        out.append(ch)
+    return ''.join(out)
+
 def ar(text):
-    """Shape + visually reorder Arabic text for correct display in Kivy."""
+    """Shape + visually reorder Arabic text for correct display in Kivy.
+
+    Splits the string into runs of Arabic vs. non-Arabic characters.
+    Arabic runs get letter-joined and reversed (so they read right-to-left
+    on a naive left-to-right renderer); non-Arabic runs — Latin text,
+    digits, dates, punctuation — are left completely untouched internally,
+    only their position among the runs is flipped to sit correctly inside
+    the RTL flow. This means a pure-English string (e.g. an Instagram
+    display name) now passes through unchanged instead of coming out
+    reversed, and numbers/dates inside an Arabic bio keep reading
+    left-to-right. It's not full Unicode BiDi, but that's enough for this
+    app's short UI strings and scraped bios."""
     try:
-        return _shape_arabic(text)
+        text = _strip_unrenderable(text)
+        if not any(_char_is_arabic(ch) for ch in text):
+            return text
+        runs = []
+        cur_type, cur = None, []
+        for ch in text:
+            t = 'ar' if _char_is_arabic(ch) else 'other'
+            if t != cur_type and cur:
+                runs.append((cur_type, ''.join(cur)))
+                cur = []
+            cur_type = t
+            cur.append(ch)
+        if cur:
+            runs.append((cur_type, ''.join(cur)))
+        shaped_runs = [
+            _shape_arabic(s) if t == 'ar' else s for t, s in runs
+        ]
+        return ''.join(reversed(shaped_runs))
     except Exception:
-        return text
         return text
 
 from kivy.app import App
@@ -331,6 +387,7 @@ class _SilentLogger:
         pass
 
 def download_media(url, download_dir):
+    import yt_dlp  # deferred — see note at the top of the file
     os.makedirs(download_dir, exist_ok=True)
     opts = {
         'outtmpl': os.path.join(download_dir, '%(title).80s.%(ext)s'),
